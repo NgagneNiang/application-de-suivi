@@ -1,0 +1,5 @@
+
+djangorestframework
+django-cors-headers
+# Ajoutez d'autres dépendances si nécessaire au fur et à mesure
+# psycopg2-binary  # Si vous utilisez PostgreSQL en production
