@@ -6,6 +6,7 @@ import { store } from './app/store';
 import { CssBaseline, ThemeProvider } from '@mui/material';
 import theme from './styles/theme';
 import './index.css';
+import 'animate.css';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(

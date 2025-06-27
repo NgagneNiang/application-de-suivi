@@ -1,287 +1,216 @@
+# api/management/commands/import_data.py
 import csv
 from django.core.management.base import BaseCommand
-from api.models import Region, Superviseur, Enqueteur, Menage 
+from api.models import Region, Superviseur, Enqueteur, Menage
 from django.utils.dateparse import parse_date, parse_time
-import traceback 
+import traceback
 
-# Définition des régions 
 REGIONS_MAPPING = {
-    "01": "Dakar", "02": "Dakar",
-    "03": "Diourbel", "04": "Fatick", "05": "Kaffrine", "06": "Kaolack",
-    "07": "Kedougou", "08": "Kolda", "09": "Louga", "10": "Matam",
-    "11": "Saint Louis", "12": "Sedhiou", "13": "Tambacounda",
-    "14": "Thies", "15": "Thies",
-    "16": "Ziguinchor",
+    "01": "DAKAR", "02": "ZIGUINCHOR", "03": "DIOURBEL", "04": "SAINT-LOUIS",
+    "05": "TAMBACOUNDA", "06": "KAOLACK", "07": "THIES", "08": "LOUGA",
+    "09": "FATICK", "10": "KOLDA", "11": "MATAM", "12": "KAFFRINE",
+    "13": "KEDOUGOU", "14": "SEDHIOU",
 }
 
-# Fonction pour convertir les statuts textuels en codes numériques (au niveau du module)
 def get_menage_statut_code(statut_textuel_csv):
-    if not statut_textuel_csv: # Gérer les chaînes vides
-        return Menage.STATUT_AFFECTE # Statut par défaut si le champ est vide
-        
+    if not statut_textuel_csv: return Menage.STATUT_AFFECTE
     statut_textuel_csv = statut_textuel_csv.strip().upper()
-    if statut_textuel_csv == "COMPLET":
-        return Menage.STATUT_COMPLET
-    elif statut_textuel_csv == "PARTIEL":
-        return Menage.STATUT_PARTIEL
-    elif statut_textuel_csv == "REFUS":
-        return Menage.STATUT_REFUS
-    elif "EXISTE PLUS" in statut_textuel_csv: # Plus flexible
-        return Menage.STATUT_N_EXISTE_PLUS
-    elif "DÉMÉNAGÉ" in statut_textuel_csv or "DEMENAGE" in statut_textuel_csv:
-        return Menage.STATUT_DEMENAGE
-    # Si vous avez un statut "NON AFFECTE" textuel dans le CSV et que vous voulez le mapper:
-    # elif statut_textuel_csv == "NON AFFECTE":
-    #     return Menage.STATUT_NON_AFFECTE
-    return Menage.STATUT_AFFECTE # Statut par défaut si non explicitement reconnu ou si le champ n'est pas dans le CSV
-
+    if statut_textuel_csv == "COMPLET": return Menage.STATUT_COMPLET
+    elif statut_textuel_csv == "PARTIEL": return Menage.STATUT_PARTIEL
+    elif statut_textuel_csv == "REFUS": return Menage.STATUT_REFUS
+    elif "EXISTE PLUS" in statut_textuel_csv: return Menage.STATUT_N_EXISTE_PLUS
+    elif "DÉMÉNAGÉ" in statut_textuel_csv or "DEMENAGE" in statut_textuel_csv: return Menage.STATUT_DEMENAGE
+    elif statut_textuel_csv == "NON AFFECTÉ" or statut_textuel_csv == "NON AFFECTE": return Menage.STATUT_NON_AFFECTE
+    return Menage.STATUT_AFFECTE
 
 class Command(BaseCommand):
-    help = 'Importe les données des fichiers CSV dans la base de données'
+    help = 'Supprime les anciennes données et importe les nouvelles depuis les fichiers CSV.'
 
     def handle(self, *args, **options):
-        self.stdout.write("Début de l'importation...")
+        self.stdout.write(self.style.WARNING("Début de l'opération d'importation et de rafraîchissement des données..."))
 
-        # 1. Créer/Mettre à jour les Régions
+        self.stdout.write(self.style.WARNING("Suppression des anciennes données..."))
+        try:
+            Menage.objects.all().delete()
+            Enqueteur.objects.all().delete()
+            Superviseur.objects.all().delete()
+            Region.objects.all().delete()
+            self.stdout.write(self.style.SUCCESS("  Anciennes données (Ménages, Enquêteurs, Superviseurs, Régions) supprimées."))
+        except Exception as e:
+            self.stderr.write(self.style.ERROR(f"Erreur lors de la suppression des anciennes données: {e}"))
+            traceback.print_exc()
+            return
+        self.stdout.write(self.style.SUCCESS("Suppression terminée."))
+
         for code, nom in REGIONS_MAPPING.items():
-            Region.objects.update_or_create(code_dr=code, defaults={'nom_region': nom})
+            Region.objects.get_or_create(code_dr=code, defaults={'nom_region': nom})
         self.stdout.write(self.style.SUCCESS('Régions importées/mises à jour.'))
 
         path_info_gen = 'INFO_GEN.CSV'
         path_info_men_record = 'INFO_MEN_RECORD.CSV'
+        superviseurs_crees_par_id = {}
+        enqueteurs_crees_par_login = {}
 
-        superviseurs_crees = set()
-        enqueteurs_crees = {} # login_enq: objet Enqueteur
-
-        # 2. Pré-traiter INFO_GEN.CSV pour les enquêteurs et superviseurs
         self.stdout.write(f"--- Lecture de {path_info_gen} pour Enquêteurs/Superviseurs ---")
         try:
-            with open(path_info_gen, 'r', encoding='utf-8-sig') as file:
-                reader = csv.DictReader(file, delimiter=';')
+            with open(path_info_gen, 'r', encoding='utf-8-sig', errors='replace') as file:
+                reader = csv.DictReader(file, delimiter=',')
                 if not reader.fieldnames:
-                    self.stderr.write(self.style.ERROR(f"Aucun en-tête trouvé dans {path_info_gen}. Le fichier est-il vide ou mal formaté ?"))
+                    self.stderr.write(self.style.ERROR(f"Aucun en-tête trouvé dans {path_info_gen}."))
                     return
-                # self.stdout.write(f"En-têtes détectés dans INFO_GEN.CSV: {reader.fieldnames}") # Déjà affiché
+                # self.stdout.write(f"En-têtes INFO_GEN: {reader.fieldnames}")
 
-                for i, row in enumerate(reader):
-                    # if i < 2: # Déjà affiché
-                    #     self.stdout.write(f"Ligne {i+1} INFO_GEN (brute): {row}")
+                for row in reader:
+                    id_superviseur_gen = row.get('cp_superviseur', '').strip()
+                    if id_superviseur_gen and id_superviseur_gen not in superviseurs_crees_par_id:
+                        sup_obj, _ = Superviseur.objects.get_or_create(id_superviseur=id_superviseur_gen)
+                        superviseurs_crees_par_id[id_superviseur_gen] = sup_obj
 
-                    login_enq = row.get('LOGIN_ENQ', '').strip()
-                    nom_enqueteur = row.get('NOM_DE_L_ENQUETEUR', '').strip()
-                    id_superviseur_gen = row.get('CP_SUPERVISEUR', '').strip() # De INFO_GEN
-
-                    if id_superviseur_gen and id_superviseur_gen not in superviseurs_crees:
-                        Superviseur.objects.get_or_create(id_superviseur=id_superviseur_gen)
-                        superviseurs_crees.add(id_superviseur_gen)
-
+                    login_enq = row.get('login_enq', '').strip()
+                    nom_enqueteur = row.get('nom_de_l_enqueteur', '').strip()
                     if login_enq and nom_enqueteur:
-                        superviseur_obj = Superviseur.objects.filter(id_superviseur=id_superviseur_gen).first()
-                        enqueteur_obj, created = Enqueteur.objects.update_or_create(
+                        superviseur_obj = superviseurs_crees_par_id.get(id_superviseur_gen)
+                        enq_obj, _ = Enqueteur.objects.get_or_create(
                             login_enq=login_enq,
-                            defaults={
-                                'nom_enqueteur': nom_enqueteur,
-                                'superviseur': superviseur_obj # Lier l'enquêteur à son superviseur
-                                }
+                            defaults={'nom_enqueteur': nom_enqueteur, 'superviseur': superviseur_obj}
                         )
-                        enqueteurs_crees[login_enq] = enqueteur_obj
-        except FileNotFoundError:
-            self.stderr.write(self.style.ERROR(f"Fichier {path_info_gen} non trouvé."))
-            return
+                        enqueteurs_crees_par_login[login_enq] = enq_obj
         except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Erreur lors de la lecture de {path_info_gen} (Enquêteurs/Superviseurs): {e}"))
-            traceback.print_exc()
-            return
-        
-        self.stdout.write(self.style.SUCCESS(f'{len(enqueteurs_crees)} Enquêteurs lus/créés depuis INFO_GEN.'))
-        self.stdout.write(self.style.SUCCESS(f'{len(superviseurs_crees)} Superviseurs uniques lus/créés depuis INFO_GEN.'))
+            self.stderr.write(self.style.ERROR(f"Erreur lecture {path_info_gen} (Enq/Sup): {e}"))
+            traceback.print_exc(); return
+        self.stdout.write(self.style.SUCCESS(f'{len(enqueteurs_crees_par_login)} Enquêteurs traités.'))
+        self.stdout.write(self.style.SUCCESS(f'{len(superviseurs_crees_par_id)} Superviseurs traités.'))
 
-
-        # 3. Traiter INFO_MEN_RECORD.CSV pour stocker ses données temporairement
         menages_data_from_men_record = {}
         self.stdout.write(f"--- Lecture de {path_info_men_record} pour données Ménages ---")
         try:
-            with open(path_info_men_record, 'r', encoding='utf-8-sig') as file:
-                reader = csv.DictReader(file, delimiter=';')
+            with open(path_info_men_record, 'r', encoding='utf-8-sig', errors='replace') as file:
+                reader = csv.DictReader(file, delimiter=',')
                 if not reader.fieldnames:
-                    self.stderr.write(self.style.ERROR(f"Aucun en-tête trouvé dans {path_info_men_record}. Le fichier est-il vide ou mal formaté ?"))
+                    self.stderr.write(self.style.ERROR(f"Aucun en-tête trouvé dans {path_info_men_record}."))
                     return
-                # self.stdout.write(f"En-têtes détectés dans INFO_MEN_RECORD.CSV: {reader.fieldnames}") # Déjà affiché
-
-                for i, row in enumerate(reader):
-                    # if i < 2: # Déjà affiché
-                    #     self.stdout.write(f"Ligne {i+1} INFO_MEN_RECORD (brute): {row}")
-                    
+                # self.stdout.write(f"En-têtes INFO_MEN_RECORD: {reader.fieldnames}")
+                for row in reader:
                     idmng = row.get('idmng', '').strip()
-                    if not idmng: 
-                        continue
-
-                    # Superviseurs depuis INFO_MEN_RECORD (s'ils n'ont pas été lus depuis INFO_GEN)
-                    id_superviseur_men = row.get('SUPERVISEUR', '').strip()
-                    if id_superviseur_men and id_superviseur_men not in superviseurs_crees:
-                        Superviseur.objects.get_or_create(id_superviseur=id_superviseur_men)
-                        superviseurs_crees.add(id_superviseur_men)
-
+                    if not idmng: continue
+                    id_superviseur_men = row.get('superviseur', '').strip()
+                    if id_superviseur_men and id_superviseur_men not in superviseurs_crees_par_id:
+                        sup_obj, _ = Superviseur.objects.get_or_create(id_superviseur=id_superviseur_men)
+                        superviseurs_crees_par_id[id_superviseur_men] = sup_obj
+                    owner_id_men_record = row.get('owner_id', '').strip()
+                    owner_name_men_record = row.get('owner_name', '').strip()
+                    if owner_id_men_record and owner_id_men_record not in enqueteurs_crees_par_login:
+                        superviseur_pour_owner = superviseurs_crees_par_id.get(id_superviseur_men)
+                        enq_obj, _ = Enqueteur.objects.get_or_create(
+                            login_enq=owner_id_men_record,
+                            defaults={'nom_enqueteur': owner_name_men_record or owner_id_men_record, 'superviseur': superviseur_pour_owner }
+                        )
+                        enqueteurs_crees_par_login[owner_id_men_record] = enq_obj
                     menages_data_from_men_record[idmng] = {
-                        'hh_trimestre': row.get('HH_TRIMESTRE', '').strip(),
-                        'superviseur_code': id_superviseur_men if id_superviseur_men else None,
-                        'dr_code': row.get('DR', '').strip()[:2], # DR de INFO_MEN_RECORD est souvent le code long (grappe)
-                        'cons_code': row.get('CONS', '').strip(), # CONS de INFO_MEN_RECORD est le code court (comme CP_CONS)
-                        'num_men_csv': row.get('NUM_MEN', '').strip(),
-                        'nom_cc_men_record': row.get('NOM_CC', '').strip(),
-                        'nom_cm_men_record': row.get('NOM_DU_CM', '').strip(),
-                        'statut_textuel_men_record': row.get('STATUT', '').strip(),
-                        'tirage_men_record': row.get('TIRAGE', '0').strip(),
-                        'ech_adresse': row.get('ECH_ADRESSE', '').strip(),
-                        'ech_telephone': row.get('ECH_NUMERO_TELEPHONE', '').strip(),
-                        'owner_id_men_record': row.get('OWNER_ID', '').strip(), # Souvent le login de l'enquêteur
-                        'owner_name_men_record': row.get('OWNER_NAME', '').strip(), # Nom de l'enquêteur
+                        'hh_trimestre': row.get('hh_trimestre', '').strip(),
+                        'superviseur_code_men_rec': id_superviseur_men,
+                        'dr_code_long': row.get('dr', '').strip(),
+                        'cons_code': row.get('cons', '').strip(),
+                        'num_men_csv': row.get('num_men', '').strip(),
+                        'nom_cc_men_record': row.get('nom_cc', '').strip(),
+                        'nom_cm_men_record': row.get('nom_du_cm', '').strip(),
+                        'statut_textuel_men_record': row.get('statut', '').strip(),
+                        'tirage_men_record': row.get('tirage', '').strip(), # Enlever la valeur par défaut '0'
+                        'ech_adresse': row.get('ech_adresse', '').strip(),
+                        'ech_telephone': row.get('ech_numero_telephone', '').strip(),
+                        'owner_id_men_record': owner_id_men_record,
                     }
-        except FileNotFoundError:
-            self.stderr.write(self.style.ERROR(f"Fichier {path_info_men_record} non trouvé."))
-            return
         except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Erreur lors de la lecture de {path_info_men_record} (données Ménages): {e}"))
-            traceback.print_exc()
-            return
-        
-        self.stdout.write(self.style.SUCCESS(f'{len(menages_data_from_men_record)} ménages pré-lus depuis INFO_MEN_RECORD.'))
+            self.stderr.write(self.style.ERROR(f"Erreur lecture {path_info_men_record} (Ménages): {e}"))
+            traceback.print_exc(); return
+        self.stdout.write(self.style.SUCCESS(f'{len(menages_data_from_men_record)} entrées ménages depuis INFO_MEN_RECORD.'))
 
-
-        # 4. Importer/Mettre à jour les Ménages en combinant les infos de INFO_GEN (prioritaire pour certains champs)
-        # et INFO_MEN_RECORD
         count_created = 0
-        count_updated = 0
-        self.stdout.write(f"--- Combinaison et Importation Finale des Ménages (source principale INFO_GEN) ---")
+        idmngs_deja_importes = set()
+        self.stdout.write(f"--- Importation des Ménages (source principale INFO_GEN) ---")
         try:
-            with open(path_info_gen, 'r', encoding='utf-8-sig') as file:
-                reader = csv.DictReader(file, delimiter=';')
-                if not reader.fieldnames: 
-                    self.stderr.write(self.style.ERROR(f"Aucun en-tête trouvé dans {path_info_gen} pour l'import final."))
+            with open(path_info_gen, 'r', encoding='utf-8-sig', errors='replace') as file:
+                reader = csv.DictReader(file, delimiter=',')
+                if not reader.fieldnames:
+                    self.stderr.write(self.style.ERROR(f"Aucun en-tête trouvé dans {path_info_gen} pour import final."))
                     return
 
                 for i, row_gen in enumerate(reader):
                     idmng = row_gen.get('idmng', '').strip()
-                    if not idmng:
-                        continue
+                    if not idmng: continue
+                    if idmng in idmngs_deja_importes: continue
                     
-                    data_men_record = menages_data_from_men_record.get(idmng, {}) # Données de INFO_MEN_RECORD pour ce ménage
-                    
-                    # Détermination du code DR:
-                    # Priorité à DR de INFO_MEN_RECORD s'il est renseigné et valide, sinon CP_GRAPPE de INFO_GEN
-                    dr_code_final = data_men_record.get('dr_code') # DR de INFO_MEN_RECORD est le code long
-                    if dr_code_final and len(dr_code_final) >=2 :
-                        dr_code_final = dr_code_final[:2] # On prend les 2 premiers caractères
-                    else: 
-                        dr_code_from_gen = row_gen.get('CP_GRAPPE', '').strip() # Ex: 011301120004
-                        if dr_code_from_gen and len(dr_code_from_gen) >= 2:
-                             dr_code_final = dr_code_from_gen[:2]
-                        else:
-                            self.stdout.write(self.style.WARNING(f"Code DR non trouvé/valide pour ménage {idmng}. DR_MEN_REC: '{data_men_record.get('dr_code')}', CP_GRAPPE_GEN: '{dr_code_from_gen}'. Skipping."))
-                            continue
+                    data_men_rec = menages_data_from_men_record.get(idmng, {})
 
+                    dr_code_long_men_rec = data_men_rec.get('dr_code_long', '').strip()
+                    dr_code_gen_grappe = row_gen.get('cp_grappe', '').strip()
+                    dr_code_final_brut = None
+
+                    if dr_code_long_men_rec and len(dr_code_long_men_rec) >= 2:
+                        dr_code_final_brut = dr_code_long_men_rec[:2]
+                    elif dr_code_gen_grappe and len(dr_code_gen_grappe) >= 2:
+                        dr_code_final_brut = dr_code_gen_grappe[:2]
+                    
+                    dr_code_final = None
+                    if dr_code_final_brut:
+                        cleaned_code = dr_code_final_brut.strip("'\" ")
+                        if len(cleaned_code) == 1 and cleaned_code.isdigit():
+                            dr_code_final = f"0{cleaned_code}"
+                        elif len(cleaned_code) == 2 and cleaned_code.isdigit():
+                            dr_code_final = cleaned_code
+                        else: continue
+                    if not dr_code_final: continue
                     region_obj = Region.objects.filter(code_dr=dr_code_final).first()
-                    if not region_obj:
-                        self.stdout.write(self.style.WARNING(f"Région non trouvée pour DR code '{dr_code_final}' (Ménage {idmng}). Skipping."))
-                        continue
-                    
-                    # Détermination de l'enquêteur
-                    # Priorité à LOGIN_ENQ de INFO_GEN, sinon OWNER_ID de INFO_MEN_RECORD
-                    login_enq_final = row_gen.get('LOGIN_ENQ', '').strip()
-                    if not login_enq_final:
-                        login_enq_final = data_men_record.get('owner_id_men_record', '').strip()
-                    
-                    enqueteur_obj = enqueteurs_crees.get(login_enq_final) # Récupère l'objet Enqueteur déjà créé
+                    if not region_obj: continue
 
-                    # Statut du ménage: Priorité à STATUT de INFO_MEN_RECORD
-                    statut_menage_code = get_menage_statut_code(data_men_record.get('statut_textuel_men_record'))
+                    login_enq_gen = row_gen.get('login_enq', '').strip()
+                    owner_id_men_rec = data_men_rec.get('owner_id_men_record', '')
+                    enqueteur_obj = enqueteurs_crees_par_login.get(login_enq_gen) or enqueteurs_crees_par_login.get(owner_id_men_rec)
                     
-                    # Tirage: Priorité à TIRAGE de INFO_MEN_RECORD
-                    try:
-                        tirage_val_str = data_men_record.get('tirage_men_record', '0').strip()
-                        tirage_val = int(float(tirage_val_str)) if tirage_val_str else 0
-                    except (ValueError, TypeError):
-                        tirage_val = 0 # Par défaut si non convertible
-
-                    # Dates et Heures: Priorité à INFO_GEN
-                    date_enquete_val = parse_date(row_gen.get('DATE_ENQ_HUMAN', '').strip())
-                    heure_debut_str = (row_gen.get('HEUR_DEBUT', '') or row_gen.get('HEUR_DEBISTATUT', '')).strip()
-                    heure_debut_val = parse_time(heure_debut_str) if heure_debut_str else None
-                    heure_fin_val = parse_time(row_gen.get('HEUR_FIN', '').strip())
-
-                    # Superviseur: Priorité à CP_SUPERVISEUR de INFO_GEN, sinon SUPERVISEUR de INFO_MEN_RECORD
-                    superviseur_code_final = row_gen.get('CP_SUPERVISEUR', '').strip()
-                    if not superviseur_code_final:
-                        superviseur_code_final = data_men_record.get('superviseur_code', '').strip()
+                    statut_menage_code = get_menage_statut_code(data_men_rec.get('statut_textuel_men_record'))
                     
-                    # Champs de base: Priorité à INFO_GEN si présents, sinon INFO_MEN_RECORD
-                    hh_trimestre_final = row_gen.get('CP_TRIMESTRE', '').strip() or data_men_record.get('hh_trimestre', '')
-                    cons_code_final = row_gen.get('CP_CONS', '').strip() or data_men_record.get('cons_code', '') # CP_CONS est le code court
-                    num_men_csv_final = row_gen.get('CP_MEN', '').strip() or data_men_record.get('num_men_csv', '')
-                    nom_cc_final = row_gen.get('CP_NOM_CC', '').strip() or data_men_record.get('nom_cc_men_record', '')
-                    nom_cm_final = row_gen.get('NOM_CM', '').strip() or data_men_record.get('nom_cm_men_record', '')
+                    # CORRECTION POUR TIRÉ ET REMPLAÇANT
+                    valeur_tirage_csv = data_men_rec.get('tirage_men_record', '').strip().lower()
+                    tirage_val = 0
+                    if 'remplaçant' in valeur_tirage_csv or 'tiré' in valeur_tirage_csv:
+                        tirage_val = 1
                     
-                    # Adresse et Tel: Priorité à ECH_... de INFO_MEN_RECORD, sinon INFO_GEN
-                    adresse_final = data_men_record.get('ech_adresse', '').strip() or row_gen.get('ADRESSE', '').strip() or row_gen.get('CON_ROST', '').strip()
-                    telephone_final = data_men_record.get('ech_telephone', '').strip() or row_gen.get('NUM_TEL1', '').strip()
-
-                    # Taille et Nbr Eligible: Uniquement depuis INFO_GEN (selon votre cahier des charges implicite)
-                    taille_men_str = row_gen.get('TAILLE_MEN', '0').strip()
-                    nbr_eligible_str = row_gen.get('NBR_ELIGIBLE', '0').strip()
-
-                    try:
-                        taille_men_val = int(taille_men_str) if taille_men_str else 0
-                    except ValueError:
-                        self.stdout.write(self.style.WARNING(f"Valeur invalide pour TAILLE_MEN: '{taille_men_str}' pour idmng {idmng}. Utilisation de 0."))
-                        taille_men_val = 0
+                    superviseur_code_final = row_gen.get('cp_superviseur', '').strip()
+                    if not superviseur_code_final: superviseur_code_final = data_men_rec.get('superviseur_code_men_rec', '')
                     
-                    try:
-                        nbr_eligible_val = int(nbr_eligible_str) if nbr_eligible_str else 0
-                    except ValueError:
-                        self.stdout.write(self.style.WARNING(f"Valeur invalide pour NBR_ELIGIBLE: '{nbr_eligible_str}' pour idmng {idmng}. Utilisation de 0."))
-                        nbr_eligible_val = 0
+                    date_enquete_val = parse_date(row_gen.get('date_enq_human', '').strip())
+                    heure_debut_str_brute = (row_gen.get('heur_debut', '') or row_gen.get('heur_debistatut', '')).strip()
+                    heure_fin_str_brute = row_gen.get('heur_fin', '').strip()
+                    heure_debut_val = parse_time(heure_debut_str_brute) if heure_debut_str_brute else None
+                    heure_fin_val = parse_time(heure_fin_str_brute) if heure_fin_str_brute else None
                     
-                    # Déterminer si rural/urbain basé sur le code DR final
-                    is_rural_val = region_obj.code_dr in ["03", "05", "07", "08", "09", "10", "12", "13"]
+                    is_rural_val = region_obj.nom_region.upper() not in ["DAKAR", "THIES"] 
 
                     menage_defaults = {
-                        'region': region_obj,
-                        'superviseur_code': superviseur_code_final if superviseur_code_final else None,
-                        'enqueteur': enqueteur_obj,
-                        'hh_trimestre': hh_trimestre_final.strip(),
-                        'cons_code': cons_code_final.strip(), 
-                        'num_men_csv': num_men_csv_final.strip(),
-                        'nom_cc': nom_cc_final.strip(),
-                        'nom_cm': nom_cm_final.strip(),
-                        'statut_menage': statut_menage_code,
-                        'tirage': tirage_val,
-                        'adresse': adresse_final.strip(),
-                        'telephone1': telephone_final.strip(),
-                        'taille_men': taille_men_val,
-                        'nbr_eligible': nbr_eligible_val,
-                        'date_enquete': date_enquete_val,
-                        'heure_debut_enquete': heure_debut_val,
-                        'heure_fin_enquete': heure_fin_val,
-                        'observations': row_gen.get('OBS', '').strip(),
+                        'region': region_obj, 'superviseur_code': superviseur_code_final, 'enqueteur': enqueteur_obj,
+                        'hh_trimestre': (row_gen.get('cp_trimestre', '') or data_men_rec.get('hh_trimestre', '')).strip(),
+                        'cons_code': (row_gen.get('cp_cons', '') or data_men_rec.get('cons_code', '')).strip(),
+                        'num_men_csv': (row_gen.get('cp_men', '') or data_men_rec.get('num_men_csv', '')).strip(),
+                        'nom_cc': (row_gen.get('cp_nom_cc', '') or data_men_rec.get('nom_cc_men_record', '')).strip(),
+                        'nom_cm': (row_gen.get('nom_cm', '') or data_men_rec.get('nom_cm_men_record', '')).strip(),
+                        'statut_menage': statut_menage_code, 'tirage': tirage_val,
+                        'adresse': (data_men_rec.get('ech_adresse', '') or row_gen.get('adresse', '') or row_gen.get('con_rost', '')).strip(),
+                        'telephone1': (data_men_rec.get('ech_telephone', '') or row_gen.get('num_tel1', '')).strip(),
+                        'taille_men': int(row_gen.get('taille_men', '0').strip() or '0'),
+                        'nbr_eligible': int(row_gen.get('nbr_eligible', '0').strip() or '0'),
+                        'date_enquete': date_enquete_val, 'heure_debut_enquete': heure_debut_val,
+                        'heure_fin_enquete': heure_fin_val, 'observations': row_gen.get('obs', '').strip(),
                         'is_rural': is_rural_val
                     }
-                    
-                    menage, created = Menage.objects.update_or_create(
-                        idmng=idmng,
-                        defaults=menage_defaults
-                    )
-                    if created:
-                        count_created += 1
-                    else:
-                        count_updated += 1
-                        
+                    Menage.objects.create(idmng=idmng, **menage_defaults)
+                    idmngs_deja_importes.add(idmng)
+                    count_created += 1
         except FileNotFoundError:
-            self.stderr.write(self.style.ERROR(f"Fichier {path_info_gen} non trouvé pour l'import final des ménages."))
+            self.stderr.write(self.style.ERROR(f"Fichier {path_info_gen} non trouvé."))
             return
         except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Erreur lors de l'importation des ménages (combinaison INFO_GEN/INFO_MEN_RECORD): {e}"))
+            self.stderr.write(self.style.ERROR(f"Erreur importation ménages: {e} (ligne idmng: {idmng if 'idmng' in locals() else 'inconnu'})"))
             traceback.print_exc()
             return
-
-        self.stdout.write(self.style.SUCCESS(f'{count_created} ménages créés, {count_updated} ménages mis à jour.'))
-        self.stdout.write(self.style.SUCCESS('Importation terminée.'))
+        self.stdout.write(self.style.SUCCESS(f'{count_created} ménages créés.'))
+        self.stdout.write(self.style.SUCCESS('Importation et rafraîchissement terminés.'))

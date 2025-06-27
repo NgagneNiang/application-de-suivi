@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'rest_framework', # Ajouter DRF
     'api',            # Ajouter votre application
     'corsheaders',
+    'django_filters', 
 ]
 
 MIDDLEWARE = [
@@ -71,11 +72,11 @@ TEMPLATES = [
     },
 ]
 
-# settings.py
 REST_FRAMEWORK = {
+    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'], # Recommandé si vous utilisez filterset_fields
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 10, # Taille de page par défaut si non spécifiée dans la requête
-    # ... autres settings ...
+    'PAGE_SIZE': 10, # Taille de page par défaut pour les ViewSets qui n'ont pas leur propre pagination_class
+                     # Ou qui utilisent la pagination par défaut.
 }
 
 # Configuration CORS (à ajuster pour la production)
