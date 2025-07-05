@@ -11,11 +11,11 @@ from .serializers import (
     MenageSerializer, MenageListSerializer
 )
 
-# --- Classe de Pagination Standard (peut être réutilisée ou définie globalement) ---
+# pagination
 class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 10  # Nombre d'éléments par page par défaut pour les listes paginées
-    page_size_query_param = 'page_size' # Permet au client de spécifier la taille via ?page_size=X
-    max_page_size = 100 # Taille de page maximale autorisée
+    page_size = 10  
+    page_size_query_param = 'page_size' 
+    max_page_size = 100 
 
 # --- ViewSets ---
 class RegionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -25,7 +25,7 @@ class RegionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = Region.objects.all().order_by('code_dr')
     serializer_class = RegionSerializer
-    pagination_class = None  # Important: Pas de pagination pour cette liste
+    pagination_class = None  
 
 
 class EnqueteurViewSet(viewsets.ReadOnlyModelViewSet):
@@ -35,7 +35,7 @@ class EnqueteurViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Enqueteur.objects.select_related('superviseur').all().order_by('nom_enqueteur')
     serializer_class = EnqueteurSerializer
     pagination_class = StandardResultsSetPagination
-    filterset_fields = ['superviseur__id_superviseur'] # Permet de filtrer les enquêteurs par superviseur
+    filterset_fields = ['superviseur__id_superviseur'] 
 
 
 class MenageViewSet(viewsets.ModelViewSet):
@@ -44,8 +44,9 @@ class MenageViewSet(viewsets.ModelViewSet):
     La liste est paginée et filtrable.
     """
     queryset = Menage.objects.select_related('region', 'enqueteur__superviseur').order_by('idmng')
-    serializer_class = MenageSerializer # Utilisé par défaut
-    filterset_fields = { # Configuration plus explicite pour django-filter
+    serializer_class = MenageSerializer 
+    filterset_fields = {
+        # filtre django-filtre
         'region__code_dr': ['exact'],
         'statut_menage': ['exact'],
         'enqueteur__login_enq': ['exact'],
@@ -63,7 +64,7 @@ class MenageViewSet(viewsets.ModelViewSet):
         return super().get_serializer_class()
 
 
-# --- Vues API pour les Statistiques et Rapports ---
+# --- Vues API pour les Statistiques ---
 class GlobalStatsAPIView(APIView):
     """
     Vue API pour récupérer les statistiques globales des enquêtes.
@@ -85,7 +86,7 @@ class GlobalStatsAPIView(APIView):
         taux_couverture_rural = ((rural_collectes / rural_attendus) * 100) if rural_attendus > 0 else 0
         taux_couverture_urbain = ((urbain_collectes / urbain_attendus) * 100) if urbain_attendus > 0 else 0
         
-        # Récupérer tous les statuts possibles pour s'assurer que même ceux avec un compte de 0 sont listés si nécessaire
+        # Récupérer tous les statuts possibles 
         all_statuts_choices = dict(Menage.STATUT_MENAGE_CHOICES)
         statuts_counts_db = Menage.objects.values('statut_menage').annotate(count=Count('idmng')).order_by('statut_menage')
 
@@ -95,11 +96,11 @@ class GlobalStatsAPIView(APIView):
         readable_statuts_counts = []
         for code, nom in all_statuts_choices.items():
             readable_statuts_counts.append({
-                "statut_code": code, # Utile pour le frontend si besoin de filtrer par code
+                "statut_code": code, #  filtrer par code
                 "statut_nom": nom,
                 "count": counts_map.get(code, 0) # Mettre 0 si le statut n'a pas de ménages
             })
-        # Trier par code pour un ordre cohérent
+        # Trier par code pour un ordre 
         readable_statuts_counts.sort(key=lambda x: x['statut_code'])
 
 
